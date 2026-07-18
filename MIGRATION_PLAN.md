@@ -42,3 +42,7 @@
 - Drift-eliminator pressure-drop inputs/database.
 - Fan operating-point and multiple-cell airflow allocation.
 - Preliminary sound model using fan tip speed, motor/fan source levels and distance attenuation.
+
+
+## Phase 2B complete
+Preliminary louver sizing, dynamic louver pressure drop, and acoustic screening integrated into legacy UI and reports.

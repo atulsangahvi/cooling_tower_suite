@@ -60,3 +60,10 @@ BRENTWOOD_PROPERTIES = {
         free_area_source="Engineering estimate; not directly stated in the available Brentwood brochure",
     ),
 }
+
+
+def net_open_area(gross_face_area_m2: float, free_area_fraction: float) -> float:
+    """Return estimated net open air area from gross face area and free-area fraction."""
+    gross = max(float(gross_face_area_m2), 0.0)
+    fraction = min(max(float(free_area_fraction), 0.0), 1.0)
+    return gross * fraction

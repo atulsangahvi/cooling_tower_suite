@@ -26,6 +26,8 @@ from docx.shared import Pt
 from cooling_tower.thermal.water_balance import estimate_water_balance
 from cooling_tower.thermal.high_range import assess_high_range
 from cooling_tower.fan.selection import select_fan_and_motor
+from cooling_tower.fan.sound import estimate_cooling_tower_sound
+from cooling_tower.airside.louver import size_louver
 
 
 # =============================================================================
@@ -984,6 +986,22 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
     pressure_results = calculate_pressure_drop_with_tower_type(
         fill_data, tower_type, air_face_velocity, water_loading, fill_depth, use_pdf_data
     )
+
+    # Phase 2B: preliminary inlet-louver sizing. Replace the old fixed inlet-louver
+    # allowance with a transparent dynamic-pressure estimate.
+    louver_free_area_fraction = float(st.session_state.get("louver_free_area_fraction_input", 0.55))
+    louver_target_velocity = float(st.session_state.get("louver_target_velocity_input", 2.5))
+    louver_loss_coefficient = float(st.session_state.get("louver_loss_coefficient_input", 2.0))
+    louver_selection = size_louver(
+        air_flow_volumetric, air_density,
+        free_area_fraction=louver_free_area_fraction,
+        target_passage_velocity_m_s=louver_target_velocity,
+        loss_coefficient=louver_loss_coefficient,
+    )
+    old_louver_dp = pressure_results["additional_losses"].get("inlet_louver", 0.0)
+    pressure_results["additional_losses"]["inlet_louver"] = louver_selection.pressure_drop_pa
+    pressure_results["other_losses_total"] = sum(pressure_results["additional_losses"].values())
+    pressure_results["total_static_pressure"] = pressure_results["fill_pressure_drop"] + pressure_results["other_losses_total"]
     
     # Calculate hydraulic properties
     water_velocity_ms = (water_loading / 3600.0) / fill_data["water_passage_area"]
@@ -1061,6 +1079,14 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
         fan_diameter_m=fan_diameter_m, fan_rpm=fan_rpm,
     )
     fan_power = fan_selection.fan_shaft_power_kw
+
+    sound_distance_m = float(st.session_state.get("sound_distance_m_input", 10.0))
+    sound_attenuation_db = float(st.session_state.get("sound_attenuation_db_input", 0.0))
+    sound_estimate = estimate_cooling_tower_sound(
+        fan_selection.fan_shaft_power_kw, air_flow_volumetric, louver_selection.passage_velocity_m_s,
+        distance_m=sound_distance_m, additional_attenuation_db=sound_attenuation_db,
+        tip_speed_m_s=fan_selection.tip_speed_m_s,
+    )
     
     # Calculate relative humidity
     P_atm = 101.325 * (1 - 0.0000225577 * altitude) ** 5.25588
@@ -1181,6 +1207,26 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
             "tip_speed_m_s": fan_selection.tip_speed_m_s,
             "tip_speed_status": fan_selection.tip_speed_status,
             "advisory": fan_selection.advisory,
+        },
+        "louver_selection": {
+            "free_area_fraction": louver_selection.free_area_fraction,
+            "target_passage_velocity_m_s": louver_selection.target_passage_velocity_m_s,
+            "required_net_free_area_m2": louver_selection.required_net_free_area_m2,
+            "recommended_gross_louver_area_m2": louver_selection.recommended_gross_louver_area_m2,
+            "loss_coefficient": louver_selection.loss_coefficient,
+            "pressure_drop_pa": louver_selection.pressure_drop_pa,
+            "status": louver_selection.status,
+            "advisory": louver_selection.advisory,
+        },
+        "sound_estimate": {
+            "fan_lwa_db": sound_estimate.fan_lwa_db,
+            "louver_lwa_db": sound_estimate.louver_lwa_db,
+            "combined_lwa_db": sound_estimate.combined_lwa_db,
+            "distance_m": sound_estimate.distance_m,
+            "estimated_lpa_db": sound_estimate.estimated_lpa_db,
+            "attenuation_db": sound_estimate.attenuation_db,
+            "status": sound_estimate.status,
+            "advisory": sound_estimate.advisory,
         },
         "delta_P_base": pressure_results.get("delta_P_base", 0),
         "pressure_drop_method": pressure_results.get("pressure_drop_method", ""),
@@ -1406,6 +1452,32 @@ def generate_txt_report(design_results):
             report.append(f"Fan Speed: {fan_sel.get('fan_rpm', 0):.0f} rpm")
             report.append(f"Fan Tip Speed: {fan_sel.get('tip_speed_m_s', 0):.1f} m/s ({fan_sel.get('tip_speed_status', 'Not evaluated')})")
         report.append(f"Fan Selection Advisory: {fan_sel.get('advisory', '')}")
+
+    louv = design_results.get('louver_selection', {})
+    if louv:
+        report.append("\nPRELIMINARY INLET LOUVER DESIGN")
+        report.append("-" * 40)
+        report.append(f"Assumed Louver Free-Area Fraction: {louv.get('free_area_fraction', 0):.2f}")
+        report.append(f"Target Louver Passage Velocity: {louv.get('target_passage_velocity_m_s', 0):.2f} m/s")
+        report.append(f"Required Net Free Louver Area: {louv.get('required_net_free_area_m2', 0):.2f} m²")
+        report.append(f"Recommended Gross Louver Area: {louv.get('recommended_gross_louver_area_m2', 0):.2f} m²")
+        report.append(f"Louver Loss Coefficient K: {louv.get('loss_coefficient', 0):.2f}")
+        report.append(f"Estimated Louver Pressure Drop: {louv.get('pressure_drop_pa', 0):.1f} Pa")
+        report.append(f"Louver Velocity Status: {louv.get('status', '')}")
+        report.append(f"Louver Advisory: {louv.get('advisory', '')}")
+
+    snd = design_results.get('sound_estimate', {})
+    if snd:
+        report.append("\nPRELIMINARY SOUND SCREENING")
+        report.append("-" * 40)
+        report.append(f"Estimated Fan Sound Power LwA: {snd.get('fan_lwa_db', 0):.1f} dB(A)")
+        report.append(f"Estimated Louver/Airflow Sound Power LwA: {snd.get('louver_lwa_db', 0):.1f} dB(A)")
+        report.append(f"Combined Estimated Sound Power LwA: {snd.get('combined_lwa_db', 0):.1f} dB(A)")
+        report.append(f"Assessment Distance: {snd.get('distance_m', 0):.1f} m")
+        report.append(f"Additional Attenuation Assumed: {snd.get('attenuation_db', 0):.1f} dB")
+        report.append(f"Estimated Free-Field Sound Pressure LpA: {snd.get('estimated_lpa_db', 0):.1f} dB(A)")
+        report.append(f"Sound Screening Status: {snd.get('status', '')}")
+        report.append(f"Sound Advisory: {snd.get('advisory', '')}")
 
     wb = design_results.get('water_balance', {})
     if wb:
@@ -2419,6 +2491,21 @@ def main():
         st.session_state.fan_diameter_m_input = fan_diameter_m_input
         st.session_state.fan_rpm_input = fan_rpm_input
 
+
+        st.subheader("🌬️ Preliminary Louver & Sound Inputs")
+        with st.expander("Louver sizing and acoustic screening", expanded=False):
+            louver_free_area_fraction_input = st.number_input("Louver free-area fraction", min_value=0.20, max_value=0.90, value=0.55, step=0.05, format="%.2f")
+            louver_target_velocity_input = st.number_input("Target air velocity through louver free area (m/s)", min_value=0.5, max_value=6.0, value=2.5, step=0.1, format="%.2f")
+            louver_loss_coefficient_input = st.number_input("Louver loss coefficient K", min_value=0.0, max_value=10.0, value=2.0, step=0.1, format="%.2f")
+            sound_distance_m_input = st.number_input("Sound assessment distance (m)", min_value=1.0, max_value=500.0, value=10.0, step=1.0, format="%.1f")
+            sound_attenuation_db_input = st.number_input("Additional barrier/silencer attenuation (dB)", min_value=0.0, max_value=40.0, value=0.0, step=1.0, format="%.1f")
+            st.caption("Both louver pressure drop and sound are preliminary estimates. Final values require manufacturer data.")
+        st.session_state.louver_free_area_fraction_input = louver_free_area_fraction_input
+        st.session_state.louver_target_velocity_input = louver_target_velocity_input
+        st.session_state.louver_loss_coefficient_input = louver_loss_coefficient_input
+        st.session_state.sound_distance_m_input = sound_distance_m_input
+        st.session_state.sound_attenuation_db_input = sound_attenuation_db_input
+
         # Fill Selection - filtered by tower type to prevent misuse of correlations
         st.subheader("🎯 Brentwood Fill Selection")
 
@@ -2794,6 +2881,21 @@ def main():
                     msg = f"Fan tip speed {fs.get('tip_speed_m_s'):.1f} m/s ({fs.get('tip_speed_status','')})."
                     if fs.get('tip_speed_status') == 'Normal': st.success(msg)
                     else: st.warning(msg)
+
+        st.subheader("🌬️ Preliminary Louver & Sound Screening")
+        for r in results:
+            lv = r.get('louver_selection', {})
+            snd = r.get('sound_estimate', {})
+            if not lv and not snd:
+                continue
+            with st.expander(f"Air inlet and sound — {r['fill_name']}", expanded=(len(results) == 1)):
+                ac1, ac2, ac3, ac4 = st.columns(4)
+                ac1.metric("Gross Louver Area", f"{lv.get('recommended_gross_louver_area_m2', 0):.2f} m²")
+                ac2.metric("Louver ΔP", f"{lv.get('pressure_drop_pa', 0):.1f} Pa")
+                ac3.metric("Combined LwA", f"{snd.get('combined_lwa_db', 0):.1f} dB(A)")
+                ac4.metric(f"LpA at {snd.get('distance_m', 0):.0f} m", f"{snd.get('estimated_lpa_db', 0):.1f} dB(A)")
+                st.caption(lv.get('advisory', ''))
+                st.caption(snd.get('advisory', ''))
 
         # Brentwood XF75 graph validity display
         xf75_checked_results = [r for r in results if r.get('xf75_graph_checks')]
