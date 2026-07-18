@@ -1,21 +1,31 @@
-# Migration plan
+# Cooling Tower Suite v2 Migration Plan
 
-## Phase 1A — completed
-- Preserve the currently working Streamlit application.
-- Add a stable `app.py` entry point.
-- Establish package namespaces and typed core models.
-- Add isolated psychrometric and water-balance modules.
+## Completed
 
-## Phase 1B
-- Extract fill data and manufacturer correlations.
-- Add regression checks against known CF1900 and XF75 cases.
-- Add graph-envelope status objects used by UI and reports.
+### Phase 1A — Safe project structure
+- Stable `legacy_app.py` retained.
+- Streamlit launcher added.
+- Core models, psychrometrics, and initial water balance extracted.
 
-## Phase 1C
-- Extract the main thermal solver.
-- Calculate required KaV/L, available KaV/L, thermal margin, and utilization.
-- Add high-range/bypass assessment as a reusable engineering module.
+### Phase 1B — Manufacturer correlation freeze and regression checks
+- CT1200AT, CF1900SB/MA, and XF75 correlations isolated.
+- Graph envelopes represented as executable checks.
+- Fill properties and free-area source notes isolated.
+- High-range/bypass assistant isolated.
+- Automated verification added.
 
-## Phase 1D
-- Extract report builders.
-- Add an engineering assessment and recommendation section.
+## Next: Phase 1C — Controlled production integration
+
+1. Wire CF1900 thermal and pressure-drop calls to the modular functions.
+2. Compare modular results against the existing app over a test matrix.
+3. Wire CT1200AT after CF1900 passes.
+4. Wire XF75 crossflow after dual-bank geometry tests pass.
+5. Add report-level engineering assessment and graph-validity summary.
+6. Remove duplicated functions only after exact regression acceptance.
+
+## Later phases
+
+- Phase 2: full water balance and cycles of concentration.
+- Phase 3: fan sizing, motor selection, louvers, and pressure-loss breakdown.
+- Phase 4: sound prediction and attenuation.
+- Phase 5: mechanical sizing and cost/life-cycle optimization.

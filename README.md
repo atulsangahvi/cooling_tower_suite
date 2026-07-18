@@ -1,49 +1,44 @@
-# Cooling Tower Design Suite v2 — Phase 1A
+# Cooling Tower Design Suite v2 — Phase 1B
 
-This repository is the safe modular foundation for the existing Streamlit cooling-tower application.
+This package continues the staged refactor without changing the working Streamlit calculation paths.
 
-## Streamlit Cloud entry point
+## Streamlit deployment
 
-Set the main file to:
+Use `app.py` as the Streamlit Cloud main file. It launches `legacy_app.py`, which remains the stable production application during migration.
 
-```text
-app.py
-```
-
-`app.py` calls the validated existing application in `legacy_app.py`, so current UI, formulas, Brentwood correlations, vendor comparison, reports, password protection, and other features remain available while modules are extracted gradually.
-
-## Why Phase 1A keeps `legacy_app.py`
-
-A direct one-step split of a large engineering application can introduce silent calculation errors. This version first establishes the package structure without changing validated formulas. The next staged releases will move one tested calculation family at a time into the package.
-
-## New package structure
-
-```text
-cooling_tower/
-  core/models.py
-  thermal/psychrometrics.py
-  thermal/water_balance.py
-  fills/
-  reports/
-  vendor/
-```
-
-The modular psychrometric and preliminary water-balance functions are included for validation. They are not yet substituted into the legacy calculation path.
-
-## Streamlit Secrets
-
-The existing app continues to read:
+Set this secret in Streamlit Cloud:
 
 ```toml
 APP_PASSWORD = "your-password"
 ```
 
-Google Drive settings remain the same as in the current application.
+## Added in Phase 1B
 
-## Phase 1B planned integration
+- Isolated Brentwood thermal and pressure-drop correlations:
+  - CT1200AT counterflow dataset
+  - CF1900SB/MA counterflow
+  - XF75 crossflow
+- Explicit graph-validity checking objects and warning generation.
+- Fill property records with source-quality notes for assumed free-area fractions.
+- Correct open-air-area helper in the new fill model.
+- High-range detection and bypass/mixing calculation module.
+- Regression tests and a standalone verification script.
+- Removed compiled `__pycache__` and `.pyc` files from the package.
 
-1. Extract and unit-test Brentwood CF1200, CF1900SB/MA, and XF75 correlations.
-2. Extract the cooling-tower solver and graph-validity checks.
-3. Add required versus available KaV/L and thermal margin assessment.
-4. Wire the validated water balance into UI, TXT, PDF, and Word reports.
-5. Replace the legacy entry point only after regression results match.
+## Verification
+
+Run locally or in GitHub Actions:
+
+```bash
+python verify_phase1b.py
+```
+
+Optional pytest run:
+
+```bash
+pytest -q
+```
+
+## Migration safety
+
+The new modules are not yet wired into `legacy_app.py`. This is intentional. Phase 1B first freezes equations in independently testable modules. Phase 1C will connect them to the production solver one fill at a time and compare old/new outputs before retiring duplicated code.
