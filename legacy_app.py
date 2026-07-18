@@ -25,6 +25,7 @@ from docx.shared import Pt
 
 from cooling_tower.thermal.water_balance import estimate_water_balance
 from cooling_tower.thermal.high_range import assess_high_range
+from cooling_tower.fan.selection import select_fan_and_motor
 
 
 # =============================================================================
@@ -1046,11 +1047,20 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
     fill_volume = fill_volume_calc
     total_surface_area = fill_volume * fill_data["surface_area"]
     
-    # Calculate fan power
-    fan_efficiency = 0.78  # 78% as per supplier SAA15
-    transmission_efficiency = 1.0
-    fan_power = (air_flow_volumetric * pressure_results["total_static_pressure"]) / \
-                (fan_efficiency * transmission_efficiency * 1000)  # kW
+    # Preliminary fan and motor duty. Values are user-adjustable in the sidebar.
+    fan_efficiency = float(st.session_state.get("fan_efficiency_input", 0.78))
+    transmission_efficiency = float(st.session_state.get("transmission_efficiency_input", 1.0))
+    motor_efficiency = float(st.session_state.get("motor_efficiency_input", 0.92))
+    motor_service_factor = float(st.session_state.get("motor_service_factor_input", 1.15))
+    fan_diameter_m = float(st.session_state.get("fan_diameter_m_input", 0.0)) or None
+    fan_rpm = float(st.session_state.get("fan_rpm_input", 0.0)) or None
+    fan_selection = select_fan_and_motor(
+        air_flow_volumetric, pressure_results["total_static_pressure"],
+        fan_efficiency=fan_efficiency, transmission_efficiency=transmission_efficiency,
+        motor_efficiency=motor_efficiency, service_factor=motor_service_factor,
+        fan_diameter_m=fan_diameter_m, fan_rpm=fan_rpm,
+    )
+    fan_power = fan_selection.fan_shaft_power_kw
     
     # Calculate relative humidity
     P_atm = 101.325 * (1 - 0.0000225577 * altitude) ** 5.25588
@@ -1132,6 +1142,9 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
         "fill_volume": fill_volume,
         "total_surface_area": total_surface_area,
         "crossflow_geometry": crossflow_geometry,
+        "geometry_input": geometry_input,
+        "open_air_area": open_air_area,
+        "air_velocity_through_fill": air_velocity_through_fill,
         
         # Hydraulic properties
         "water_velocity": water_velocity_ms,
@@ -1153,6 +1166,22 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
         "additional_losses": pressure_results["additional_losses"],
         "other_losses_total": pressure_results.get("other_losses_total", sum(pressure_results["additional_losses"].values())),
         "fan_power": fan_power,
+        "fan_selection": {
+            "air_power_kw": fan_selection.air_power_kw,
+            "fan_shaft_power_kw": fan_selection.fan_shaft_power_kw,
+            "motor_input_at_duty_kw": fan_selection.motor_input_at_duty_kw,
+            "selected_motor_kw": fan_selection.selected_motor_kw,
+            "specific_fan_power_w_per_m3_s": fan_selection.specific_fan_power_w_per_m3_s,
+            "fan_efficiency": fan_selection.fan_efficiency,
+            "transmission_efficiency": fan_selection.transmission_efficiency,
+            "motor_efficiency": fan_selection.motor_efficiency,
+            "service_factor": fan_selection.service_factor,
+            "fan_diameter_m": fan_selection.fan_diameter_m,
+            "fan_rpm": fan_selection.fan_rpm,
+            "tip_speed_m_s": fan_selection.tip_speed_m_s,
+            "tip_speed_status": fan_selection.tip_speed_status,
+            "advisory": fan_selection.advisory,
+        },
         "delta_P_base": pressure_results.get("delta_P_base", 0),
         "pressure_drop_method": pressure_results.get("pressure_drop_method", ""),
         "uses_published_dp_equation": pressure_results.get("uses_published_dp_equation", False),
@@ -1183,12 +1212,14 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
         "fouling_risk": {"risk_score": risk_score, "risk_level": risk_level},
         "operating_warnings": operating_warnings,
         "xf75_graph_checks": xf75_graph_checks,
+        "cf1900_graph_checks": cf1900_graph_checks,
         
         # Fill characteristics
         "surface_area_density": fill_data["surface_area"],
         "hydraulic_diameter": fill_data["hydraulic_diameter"],
         "flute_angle": fill_data["flute_angle"],
         "free_area_fraction": fill_data["free_area_fraction"],
+        "free_area_source": fill_data.get("free_area_source", "Engineering estimate - not directly published"),
         
         # Tower characteristics
         "tower_efficiency_factor": tower_data["fill_utilization"],
@@ -1321,7 +1352,10 @@ def generate_txt_report(design_results):
     report.append("\nDESIGN RESULTS")
     report.append("-" * 40)
     report.append(f"Achieved Cold Water: {design_results['T_cold_achieved']:.2f} °C")
-    report.append(f"Heat Rejection: {design_results['Q_achieved']:.0f} kW")
+    report.append(f"Required Heat Rejection: {design_results.get('Q_target', 0):.0f} kW")
+    report.append(f"Available/Achievable Heat Rejection: {design_results['Q_achieved']:.0f} kW")
+    report.append(f"Thermal Capacity Margin: {design_results['Q_achieved'] - design_results.get('Q_target', 0):.0f} kW")
+    report.append("Note: Achievable heat rejection is available capacity at the calculated cold-water temperature; controls normally prevent unnecessary overcooling.")
     report.append(f"Cooling Range: {design_results['cooling_range']:.2f} °C")
     report.append(f"Approach: {design_results['approach']:.2f} °C")
     report.append(f"NTU: {design_results['NTU']:.3f}")
@@ -1352,7 +1386,26 @@ def generate_txt_report(design_results):
     for loss_name, loss_value in design_results.get('additional_losses', {}).items():
         report.append(f"  - {loss_name}: {loss_value:.1f} Pa")
     report.append(f"Total Static Pressure: {design_results['total_static_pressure']:.1f} Pa")
-    report.append(f"Estimated Fan Power: {design_results['fan_power']:.2f} kW")
+    report.append(f"Estimated Fan Shaft Power: {design_results['fan_power']:.2f} kW")
+
+    fan_sel = design_results.get('fan_selection', {})
+    if fan_sel:
+        report.append("\nPRELIMINARY FAN & MOTOR SELECTION")
+        report.append("-" * 40)
+        report.append(f"Fan Duty Airflow: {design_results['air_flow_volumetric']:.2f} m³/s")
+        report.append(f"Fan Duty Static Pressure: {design_results['total_static_pressure']:.1f} Pa")
+        report.append(f"Air Power: {fan_sel.get('air_power_kw', 0):.2f} kW")
+        report.append(f"Assumed Fan Efficiency: {fan_sel.get('fan_efficiency', 0)*100:.1f} %")
+        report.append(f"Fan Shaft Power: {fan_sel.get('fan_shaft_power_kw', 0):.2f} kW")
+        report.append(f"Estimated Motor Electrical Input at Duty: {fan_sel.get('motor_input_at_duty_kw', 0):.2f} kW")
+        report.append(f"Suggested Standard Motor Rating: {fan_sel.get('selected_motor_kw', 0):.2f} kW")
+        report.append(f"Motor Service Factor Used: {fan_sel.get('service_factor', 1):.2f}")
+        report.append(f"Specific Fan Power: {fan_sel.get('specific_fan_power_w_per_m3_s', 0):.1f} W/(m³/s)")
+        if fan_sel.get('tip_speed_m_s') is not None:
+            report.append(f"Fan Diameter: {fan_sel.get('fan_diameter_m', 0):.2f} m")
+            report.append(f"Fan Speed: {fan_sel.get('fan_rpm', 0):.0f} rpm")
+            report.append(f"Fan Tip Speed: {fan_sel.get('tip_speed_m_s', 0):.1f} m/s ({fan_sel.get('tip_speed_status', 'Not evaluated')})")
+        report.append(f"Fan Selection Advisory: {fan_sel.get('advisory', '')}")
 
     wb = design_results.get('water_balance', {})
     if wb:
@@ -2350,6 +2403,22 @@ def main():
                                   step=100, format="%d",
                                   help="Altitude above sea level for air density correction")
         
+        st.subheader("🌀 Preliminary Fan & Motor Inputs")
+        with st.expander("Fan efficiency, motor and optional tip-speed check", expanded=False):
+            fan_efficiency_input = st.number_input("Fan static efficiency", min_value=0.40, max_value=0.90, value=0.78, step=0.01, format="%.2f")
+            transmission_efficiency_input = st.number_input("Transmission efficiency", min_value=0.70, max_value=1.00, value=1.00, step=0.01, format="%.2f")
+            motor_efficiency_input = st.number_input("Motor efficiency", min_value=0.70, max_value=0.98, value=0.92, step=0.01, format="%.2f")
+            motor_service_factor_input = st.number_input("Motor sizing service factor", min_value=1.00, max_value=1.50, value=1.15, step=0.05, format="%.2f")
+            fan_diameter_m_input = st.number_input("Fan diameter for tip-speed check (m, 0 = not specified)", min_value=0.0, max_value=20.0, value=0.0, step=0.1, format="%.2f")
+            fan_rpm_input = st.number_input("Fan speed for tip-speed check (rpm, 0 = not specified)", min_value=0.0, max_value=1800.0, value=0.0, step=10.0, format="%.0f")
+            st.caption("Preliminary only. Final fan selection must use a manufacturer fan curve.")
+        st.session_state.fan_efficiency_input = fan_efficiency_input
+        st.session_state.transmission_efficiency_input = transmission_efficiency_input
+        st.session_state.motor_efficiency_input = motor_efficiency_input
+        st.session_state.motor_service_factor_input = motor_service_factor_input
+        st.session_state.fan_diameter_m_input = fan_diameter_m_input
+        st.session_state.fan_rpm_input = fan_rpm_input
+
         # Fill Selection - filtered by tower type to prevent misuse of correlations
         st.subheader("🎯 Brentwood Fill Selection")
 
@@ -2708,6 +2777,23 @@ def main():
             hr_cols[2].metric("Suggested Bypass", f"{hra.get('bypass_flow_m3_h', 0):.1f} m³/h")
             hr_cols[3].metric("Mixed Tower Inlet", f"{hra.get('mixed_tower_inlet_c', 0):.2f} °C")
             st.caption(hra.get('advisory', ''))
+
+        st.subheader("🌀 Preliminary Fan & Motor Selection")
+        for r in results:
+            fs = r.get('fan_selection', {})
+            if not fs:
+                continue
+            with st.expander(f"Fan duty — {r['fill_name']}", expanded=(len(results) == 1)):
+                fc1, fc2, fc3, fc4 = st.columns(4)
+                fc1.metric("Duty Airflow", f"{r['air_flow_volumetric']:.2f} m³/s")
+                fc2.metric("Static Pressure", f"{r['total_static_pressure']:.1f} Pa")
+                fc3.metric("Fan Shaft Power", f"{fs.get('fan_shaft_power_kw', 0):.2f} kW")
+                fc4.metric("Suggested Motor", f"{fs.get('selected_motor_kw', 0):.2f} kW")
+                st.caption(fs.get('advisory', ''))
+                if fs.get('tip_speed_m_s') is not None:
+                    msg = f"Fan tip speed {fs.get('tip_speed_m_s'):.1f} m/s ({fs.get('tip_speed_status','')})."
+                    if fs.get('tip_speed_status') == 'Normal': st.success(msg)
+                    else: st.warning(msg)
 
         # Brentwood XF75 graph validity display
         xf75_checked_results = [r for r in results if r.get('xf75_graph_checks')]
