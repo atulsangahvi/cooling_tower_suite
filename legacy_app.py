@@ -23,6 +23,9 @@ import docx
 from docx import Document
 from docx.shared import Pt
 
+from cooling_tower.thermal.water_balance import estimate_water_balance
+from cooling_tower.thermal.high_range import assess_high_range
+
 
 # =============================================================================
 # PASSWORD PROTECTION
@@ -779,8 +782,10 @@ def calculate_pressure_drop_with_tower_type(fill_data, tower_type, air_face_velo
     is_ct1200_equation = (fill_data.get('name') == 'Brentwood CT1200AT (New from PDF)' and use_pdf_data and tower_type.startswith('counterflow'))
     is_cf1900_equation = (str(fill_data.get('name','')).startswith('Brentwood CF1900SB/MA') and use_pdf_data)
     is_xf75_crossflow_equation = (str(fill_data.get('name','')).startswith('Brentwood XF75') and use_pdf_data and tower_type == 'crossflow')
-    geometry_multiplier = 1.0 if (is_ct1200_equation or is_cf1900_equation or is_xf75_crossflow_equation) else fill_depth
-    fill_pressure_drop = delta_P_base * velocity_factor * geometry_multiplier * tower_factor
+    is_published_dp_equation = is_ct1200_equation or is_cf1900_equation or is_xf75_crossflow_equation
+    geometry_multiplier = 1.0 if is_published_dp_equation else fill_depth
+    applied_tower_factor = 1.0 if is_published_dp_equation else tower_factor
+    fill_pressure_drop = delta_P_base * velocity_factor * geometry_multiplier * applied_tower_factor
     
     # Additional losses based on tower type
     if tower_type == "counterflow_induced":
@@ -1020,6 +1025,22 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
     T_cold_achieved = min(T_cold_achieved, T_hot - 0.5)
     
     Q_achieved = L * 4.186 * (T_hot - T_cold_achieved)
+
+    # Phase 1C: preliminary water balance and high-range/bypass assessment.
+    circulation_m3_h = L * 3.6  # rho_water approximately 1000 kg/m3
+    design_range_c = max(T_hot - T_cold_target, 0.0)
+    water_balance = estimate_water_balance(
+        circulation_m3_h=circulation_m3_h,
+        range_c=design_range_c,
+        cycles_of_concentration=4.0,
+        drift_percent=0.005,
+    )
+    high_range_assessment = assess_high_range(
+        process_flow_m3_h=circulation_m3_h,
+        hot_process_return_c=T_hot,
+        cold_supply_c=T_cold_target,
+        target_tower_range_c=10.0,
+    )
     
     # Fill volume and surface area
     fill_volume = fill_volume_calc
@@ -1137,6 +1158,26 @@ def solve_cooling_tower_enhanced(L, G, T_hot, T_cold_target, Twb, Tdb, fill_type
         "uses_published_dp_equation": pressure_results.get("uses_published_dp_equation", False),
         "tower_pressure_factor_applied": pressure_results.get("tower_factor", 1.0),
         "legacy_tower_pressure_factor": pressure_results.get("legacy_tower_factor", TOWER_TYPES[tower_type]["typical_pressure_drop_factor"]),
+
+        # Preliminary water balance and high-range advisory
+        "water_balance": {
+            "evaporation_m3_h": water_balance.evaporation_m3_h,
+            "drift_m3_h": water_balance.drift_m3_h,
+            "blowdown_m3_h": water_balance.blowdown_m3_h,
+            "makeup_m3_h": water_balance.makeup_m3_h,
+            "cycles_of_concentration": 4.0,
+            "drift_percent": 0.005,
+        },
+        "high_range_assessment": {
+            "process_range_c": high_range_assessment.process_range_c,
+            "classification": high_range_assessment.classification,
+            "target_tower_range_c": high_range_assessment.target_tower_range_c,
+            "process_flow_m3_h": high_range_assessment.process_flow_m3_h,
+            "recommended_tower_flow_m3_h": high_range_assessment.recommended_tower_flow_m3_h,
+            "bypass_flow_m3_h": high_range_assessment.bypass_flow_m3_h,
+            "mixed_tower_inlet_c": high_range_assessment.mixed_tower_inlet_c,
+            "advisory": high_range_assessment.advisory,
+        },
         
         # Assessments
         "fouling_risk": {"risk_score": risk_score, "risk_level": risk_level},
@@ -1312,6 +1353,31 @@ def generate_txt_report(design_results):
         report.append(f"  - {loss_name}: {loss_value:.1f} Pa")
     report.append(f"Total Static Pressure: {design_results['total_static_pressure']:.1f} Pa")
     report.append(f"Estimated Fan Power: {design_results['fan_power']:.2f} kW")
+
+    wb = design_results.get('water_balance', {})
+    if wb:
+        report.append("\nPRELIMINARY WATER BALANCE")
+        report.append("-" * 40)
+        report.append(f"Evaporation Loss: {wb.get('evaporation_m3_h', 0):.3f} m³/h")
+        report.append(f"Drift Loss: {wb.get('drift_m3_h', 0):.3f} m³/h")
+        report.append(f"Blowdown: {wb.get('blowdown_m3_h', 0):.3f} m³/h")
+        report.append(f"Total Makeup Water: {wb.get('makeup_m3_h', 0):.3f} m³/h")
+        report.append(f"Assumed Cycles of Concentration: {wb.get('cycles_of_concentration', 4.0):.1f}")
+        report.append(f"Assumed Drift Rate: {wb.get('drift_percent', 0.005):.4f} % of circulation")
+        report.append("Note: Preliminary water balance; confirm drift eliminator guarantee and water-treatment limits.")
+
+    hra = design_results.get('high_range_assessment', {})
+    if hra:
+        report.append("\nHIGH COOLING-RANGE / BYPASS ASSESSMENT")
+        report.append("-" * 40)
+        report.append(f"Process Range: {hra.get('process_range_c', 0):.2f} °C")
+        report.append(f"Range Classification: {hra.get('classification', 'N/A')}")
+        report.append(f"Target Tower Range for Advisory: {hra.get('target_tower_range_c', 10):.2f} °C")
+        report.append(f"Process Flow: {hra.get('process_flow_m3_h', 0):.1f} m³/h")
+        report.append(f"Recommended Tower Circulation: {hra.get('recommended_tower_flow_m3_h', 0):.1f} m³/h")
+        report.append(f"Suggested Bypass Flow: {hra.get('bypass_flow_m3_h', 0):.1f} m³/h")
+        report.append(f"Mixed Tower Inlet Temperature: {hra.get('mixed_tower_inlet_c', 0):.2f} °C")
+        report.append(f"Advisory: {hra.get('advisory', '')}")
     
     # Tower Characteristics
     report.append("\nTOWER CHARACTERISTICS")
@@ -2615,6 +2681,34 @@ def main():
         with col_atm4:
             st.metric("Altitude", f"{altitude} m ASL")
         
+        # Phase 1C engineering assistants: water balance and high-range advisory
+        if results:
+            st.subheader("💧 Preliminary Water Balance")
+            wb = results[0].get('water_balance', {})
+            wb_cols = st.columns(4)
+            wb_cols[0].metric("Evaporation", f"{wb.get('evaporation_m3_h', 0):.3f} m³/h")
+            wb_cols[1].metric("Drift", f"{wb.get('drift_m3_h', 0):.3f} m³/h")
+            wb_cols[2].metric("Blowdown", f"{wb.get('blowdown_m3_h', 0):.3f} m³/h")
+            wb_cols[3].metric("Makeup Water", f"{wb.get('makeup_m3_h', 0):.3f} m³/h")
+            st.caption("Preliminary basis: 4 cycles of concentration and 0.005% drift. Confirm final values with water-treatment and drift-eliminator data.")
+
+            hra = results[0].get('high_range_assessment', {})
+            st.subheader("🌡️ Cooling-Range Assessment")
+            range_class = hra.get('classification', 'N/A')
+            range_text = f"Process range = {hra.get('process_range_c', 0):.2f} °C — {range_class}"
+            if range_class in ('High', 'Very High'):
+                st.warning(range_text)
+            elif range_class == 'Caution':
+                st.info(range_text)
+            else:
+                st.success(range_text)
+            hr_cols = st.columns(4)
+            hr_cols[0].metric("Process Flow", f"{hra.get('process_flow_m3_h', 0):.1f} m³/h")
+            hr_cols[1].metric("Suggested Tower Flow", f"{hra.get('recommended_tower_flow_m3_h', 0):.1f} m³/h")
+            hr_cols[2].metric("Suggested Bypass", f"{hra.get('bypass_flow_m3_h', 0):.1f} m³/h")
+            hr_cols[3].metric("Mixed Tower Inlet", f"{hra.get('mixed_tower_inlet_c', 0):.2f} °C")
+            st.caption(hra.get('advisory', ''))
+
         # Brentwood XF75 graph validity display
         xf75_checked_results = [r for r in results if r.get('xf75_graph_checks')]
         if xf75_checked_results:
